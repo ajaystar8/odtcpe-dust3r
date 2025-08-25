@@ -1,3 +1,9 @@
+"""
+This file is derived from [DUSt3R](https://github.com/ajaystar8/odtcpe-dust3r/blob/main/dust3r/utils/image.py).
+Modified for [ODTCPE] by Ajay Rajendra Kumar
+
+Original header:
+"""
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
@@ -14,7 +20,7 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2  # noqa
 
 try:
-    from pillow_heif import register_heif_opener  # noqa
+    from pillow_heif import register_heif_opener  # type: ignore
     register_heif_opener()
     heif_support_enabled = True
 except ImportError:
@@ -73,6 +79,9 @@ def _resize_pil_image(img, long_edge_size):
 
 def load_images(folder_or_list, size, square_ok=False, verbose=True, patch_size=16):
     """ open and convert all images in a list or folder to proper input format for DUSt3R
+
+    - The function scales the larger size of the image (out of W and H) to `size`. Then it scales the other dimension to keep the aspect ratio.
+    - The final dimensions are such that the image can be exactly divided into patches of size `patch_size`.
     """
     if isinstance(folder_or_list, str):
         if verbose:

@@ -1,9 +1,18 @@
+"""
+This file is derived from [DUSt3R](https://github.com/ajaystar8/odtcpe-dust3r/blob/main/dust3r/model.py).
+Modified for [ODTCPE] by Ajay Rajendra Kumar
+
+Original header:
+"""
 # Copyright (C) 2024-present Naver Corporation. All rights reserved.
 # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
 #
 # --------------------------------------------------------
 # DUSt3R model class
 # --------------------------------------------------------
+import sys
+sys.path.append("/projects/vig/ajay/ODT_CPE_KITTI/external/dust3r/croco")
+
 from copy import deepcopy
 import torch
 import os
@@ -12,10 +21,9 @@ import huggingface_hub
 
 from .utils.misc import fill_default_args, freeze_all_params, is_symmetrized, interleave, transpose_to_landscape
 from .heads import head_factory
-from dust3r.patch_embed import get_patch_embed
+from dust3r.dust3r.patch_embed import get_patch_embed
 
-import dust3r.utils.path_to_croco  # noqa: F401
-from models.croco import CroCoNet  # noqa
+from dust3r.croco.models.croco import CroCoNet    # type: ignore
 
 inf = float('inf')
 
@@ -24,10 +32,9 @@ assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated h
                                                                      "please reinstall requirements.txt")
 
 
-def load_model(model_path, device, verbose=True):
-    if verbose:
-        print('... loading model from', model_path)
-    ckpt = torch.load(model_path, map_location='cpu')
+def load_model(model_path, device, verbose=False):
+    print("[IMAGE FEATURE ENCODER] Loading pretrained model from: ", model_path)
+    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
     args = ckpt['args'].model.replace("ManyAR_PatchEmbed", "PatchEmbedDust3R")
     if 'landscape_only' not in args:
         args = args[:-1] + ', landscape_only=False)'
@@ -38,8 +45,7 @@ def load_model(model_path, device, verbose=True):
         print(f"instantiating : {args}")
     net = eval(args)
     s = net.load_state_dict(ckpt['model'], strict=False)
-    if verbose:
-        print(s)
+    print(s)
     return net.to(device)
 
 
@@ -159,13 +165,7 @@ class AsymmetricCroCo3DStereo (
         shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
         # warning! maybe the images have different portrait/landscape orientations
 
-        if is_symmetrized(view1, view2):
-            # computing half of forward pass!'
-            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
-            feat1, feat2 = interleave(feat1, feat2)
-            pos1, pos2 = interleave(pos1, pos2)
-        else:
-            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
+        feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 
@@ -201,11 +201,25 @@ class AsymmetricCroCo3DStereo (
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
 
         # combine all ref images into object-centric representation
-        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+        feat1, feat2 = self._decoder(feat1, pos1, feat2, pos2)
 
-        with torch.cuda.amp.autocast(enabled=False):
-            res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
-            res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
-
-        res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        ######################### UPSAMPLING (Currently only for DPT head) #########################
+        # TODO: Ensure the linear head also outputs a list (though a single level)
+        with torch.amp.autocast('cuda', enabled=False):
+            res1 = self._downstream_head(1, [tok.float() for tok in feat1], shape1)
+            res2 = self._downstream_head(2, [tok.float() for tok in feat2], shape2)
+        
         return res1, res2
+        ######################################################################
+
+        ######################### NO UPSAMPLING #########################
+        # feat1_final, feat2_final = feat1[-1], feat2[-1] # [1, 288, 768], [1, 288, 768]
+        # shape1, shape2 = shape1, shape2 # [144, 512], [144, 512] (H, W -> as per PyTorch convention)
+        
+        # # reshape the feature vectors
+        # # feat = [B, N, C] -> [B, C, N] -> [B, C, H // patch_size, W // patch_size]
+        # feat1_final = feat1_final.permute(0, 2, 1).view(-1, feat1_final.shape[2], shape1[0] // self.patch_size, shape1[1] // self.patch_size)
+        # feat2_final = feat2_final.permute(0, 2, 1).view(-1, feat2_final.shape[2], shape2[0] // self.patch_size, shape2[1] // self.patch_size)
+        # return feat1_final, feat2_final
+        ######################################################################
+

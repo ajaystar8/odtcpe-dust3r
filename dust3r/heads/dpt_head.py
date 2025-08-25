@@ -12,9 +12,8 @@ from einops import rearrange
 from typing import List
 import torch
 import torch.nn as nn
-from dust3r.heads.postprocess import postprocess
-import dust3r.utils.path_to_croco  # noqa: F401
-from models.dpt_block import DPTOutputAdapter  # noqa
+from .postprocess import postprocess
+from dust3r.croco.models.dpt_block import DPTOutputAdapter  # noqa
 
 
 class DPTOutputAdapter_fix(DPTOutputAdapter):
@@ -30,12 +29,17 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         del self.act_2_postprocess
         del self.act_3_postprocess
         del self.act_4_postprocess
+        # ODTFormer: since we dont want point map regression, we do not need to train this
+        # del self.head
+        # del self.scratch.refinenet4.resConfUnit1
 
     def forward(self, encoder_tokens: List[torch.Tensor], image_size=None):
         assert self.dim_tokens_enc is not None, 'Need to call init(dim_tokens_enc) function first'
         # H, W = input_info['image_size']
         image_size = self.image_size if image_size is None else image_size
-        H, W = image_size
+        H, W = image_size # (144, 512)
+        # print(f"image size in dpt_block: {image_size}")
+
         # Number of patches in height and width
         N_H = H // (self.stride_level * self.P_H)
         N_W = W // (self.stride_level * self.P_W)
@@ -54,15 +58,18 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         layers = [self.scratch.layer_rn[idx](l) for idx, l in enumerate(layers)]
 
         # Fuse layers using refinement stages
-        path_4 = self.scratch.refinenet4(layers[3])[:, :, :layers[2].shape[2], :layers[2].shape[3]]
-        path_3 = self.scratch.refinenet3(path_4, layers[2])
-        path_2 = self.scratch.refinenet2(path_3, layers[1])
-        path_1 = self.scratch.refinenet1(path_2, layers[0])
+        # TODO: make downsampling factor configurable
+        path_4 = self.scratch.refinenet4(layers[3])[:, :, :layers[2].shape[2], :layers[2].shape[3]].contiguous() # downsample factor = 16 -> [1, 256, 32, 9]
+        path_3 = self.scratch.refinenet3(path_4, layers[2]) # downsample factor = 8 -> [1, 256, 64, 18]    
+        path_2 = self.scratch.refinenet2(path_3, layers[1]) # downsample factor = 4 -> [1, 256, 128, 36]
+        path_1 = self.scratch.refinenet1(path_2, layers[0]) # downsample factor = 2 -> [1, 256, 256, 72]
 
-        # Output head
-        out = self.head(path_1)
+        # Refinenets are basically doing the inverse of what FPNs are designed to do - make the feature maps coarser so as to
+        # increase the spatial resolution of the output. Hence, the output of the first refined here has the lowest spatial resolution
+        # (which is the case with the output of the last layer in FPN) but highly concentrated semantic information.
+        # The last refined layer has the highest spatial resolution but less semantic information.
+        return [path_1, path_2, path_3, path_4] # smallest resolution last
 
-        return out
 
 
 class PixelwiseTaskWithDPT(nn.Module):
@@ -88,9 +95,13 @@ class PixelwiseTaskWithDPT(nn.Module):
 
     def forward(self, x, img_info):
         out = self.dpt(x, image_size=(img_info[0], img_info[1]))
-        if self.postprocess:
-            out = self.postprocess(out, self.depth_mode, self.conf_mode)
-        return out
+        # TODO: Post processing not required for ODTFormer
+        # if self.postprocess:
+            # out = self.postprocess(out, self.depth_mode, self.conf_mode)
+        # return dict(pts3d=out)
+        return {
+                'multi_scale_feats': out, # return multi-scale features for ODTFormer
+            }  
 
 
 def create_dpt_head(net, has_conf=False):

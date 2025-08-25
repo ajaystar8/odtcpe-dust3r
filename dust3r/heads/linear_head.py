@@ -6,7 +6,7 @@
 # --------------------------------------------------------
 import torch.nn as nn
 import torch.nn.functional as F
-from dust3r.heads.postprocess import postprocess
+from dust3r.dust3r.heads.postprocess import postprocess
 
 
 class LinearPts3d (nn.Module):
@@ -33,8 +33,13 @@ class LinearPts3d (nn.Module):
         B, S, D = tokens.shape
 
         # extract 3D points
+        # [1, 768, 288] -> [1, 16 * 16 * 3, 288]
         feat = self.proj(tokens)  # B,S,D
+
+        # [1, 288, 16 * 16 * 3] -> [1, 768, 9, 32]
         feat = feat.transpose(-1, -2).view(B, -1, H//self.patch_size, W//self.patch_size)
+
+        # [1, 768, 9, 32] -> [1, 3, 144, 512]
         feat = F.pixel_shuffle(feat, self.patch_size)  # B,3,H,W
 
         # permute + norm depth
